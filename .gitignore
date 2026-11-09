@@ -1,0 +1,4 @@
+# Zugangsdaten und Exporte nicht einchecken
+config.json
+*.xlsx
+__pycache__/

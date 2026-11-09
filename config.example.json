@@ -1,0 +1,7 @@
+{
+  "client_id": "DEINE_CLIENT_ID",
+  "client_secret": "DEIN_CLIENT_SECRET",
+  "global_company_id": "",
+  "locale": "de_DE",
+  "rsids": ["rsid_prod", "rsid_app"]
+}
