@@ -2,7 +2,13 @@
 
 Exportiert eVars, Props, List-Variablen, Events, Segmente und berechnete Metriken
 einer oder mehrerer Report Suites in **eine Excel-Datei**, inklusive Beschreibungen,
-Allokation, Expiration, Scope und Segmentdefinition als lesbarem Text.
+eVar-Allokation und -Expiration, Scope und Segmentdefinition als lesbarem Text.
+
+> **Hinweis:** Adobe hat die Analytics 1.4 API im August 2026 abgeschaltet
+> (`api.omniture.com` antwortet nicht mehr). Das Skript nutzt deshalb nur noch die
+> 2.0 API. Diese liefert Konfigurationsdetails **nur für eVars**. Für Props, Events
+> und List-Variablen gibt es nur Name, Beschreibung und Kategorie
+> ([Migration Guide](https://developer.adobe.com/analytics-apis/docs/2.0/guides/migration)).
 
 ## 1. Einmalige Einrichtung in Adobe
 
@@ -10,8 +16,7 @@ Allokation, Expiration, Scope und Segmentdefinition als lesbarem Text.
    dann *Add API* → **Adobe Analytics** → **OAuth Server-to-Server**.
 2. Ein **Produktprofil** zuweisen, das
    - Zugriff auf die gewünschten Report Suites hat und
-   - **Report Suite Tools / Admin-Rechte** besitzt. Das ist für die 1.4-Admin-Methoden
-     (Allokation, Expiration usw.) nötig und damit `includeType=all` alle Segmente liefert.
+   - **Admin-Rechte** besitzt, damit `includeType=all` alle Segmente liefert.
 3. Den technischen Account im **Admin Console**-Produktprofil als **Product Admin**
    bzw. Analytics-Admin führen. Sonst sieht er nur eigene oder geteilte Segmente.
 4. *Client ID* und *Client Secret* aus der Developer Console kopieren.
@@ -39,20 +44,17 @@ python adobe_sdr_export.py --rsids rsid_prod rsid_app --out sdr_2026-11.xlsx
 
 # alle Segmente/Calc Metrics der Company, nicht nur die der gewählten RS
 python adobe_sdr_export.py --all-segments
-
-# ohne 1.4 API, z. B. wenn die Admin-Rechte fehlen
-python adobe_sdr_export.py --skip-14
 ```
 
 ## 4. Inhalt der Excel-Datei
 
 | Tab | Quelle | Wichtige Spalten |
 |---|---|---|
-| Übersicht | beide | Anzahl Komponenten je Report Suite, Exportzeitpunkt |
-| eVars | 1.4 + 2.0 | name, description, `allocation_type`, `expiration_type`, `expiration_custom_days`, `merchandising_syntax`, enabled, description_2_0 |
-| Props | 1.4 + 2.0 | pathing, list prop, participation, case sensitivity |
-| Listvars | 1.4 | Delimiter, Allokation, Expiration |
-| Events | 1.4 + 2.0 | `type`, `serialization`, `participation`, `polarity`, visibility |
+| Übersicht | 2.0 | Anzahl Komponenten je Report Suite, davon eVars mit Einstellungen, Exportzeitpunkt |
+| eVars | 2.0 | name, description, `allocationType`, `expirationType`, `expirationCustomDays`, `dataType` (text/counter), `merchandisingSyntax`, `bindingEvents`, `ecomAllocationType`, `attributionModel` |
+| Props | 2.0 | name, description, Kategorie, pathable (keine Prop-Einstellungen in der 2.0 API) |
+| Listvars | 2.0 | name, description (Delimiter, Allokation, Expiration nicht in der 2.0 API) |
+| Events | 2.0 | name, description, type, polarity, Kategorie (Serialisierung/Participation nicht in der 2.0 API) |
 | Segmente | 2.0 | **scope_container** (Hit/Visit/Visitor), **definition_lesbar**, verwendete_variablen, verwendete_segmente, owner, tags, shares, definition_json |
 | Calc Metrics | 2.0 | **formel_lesbar**, verwendete Komponenten/Segmente, owner, tags |
 | Dimensionen (alle) / Metriken (alle) | 2.0 | vollständige Liste inkl. Standard-Dimensionen, Kategorie, Tags |
@@ -69,9 +71,12 @@ Visit-Container [ (Device [evar5] equals 'mobile' AND (Login [event1] exists OR 
 
 ## Hinweise
 
-- Wenn die **1.4-Aufrufe fehlschlagen** (403/401), läuft das Skript trotzdem weiter und
-  füllt eVars, Props und Events aus der 2.0 API, dann aber ohne Allokation und Expiration.
-  Die Warnung steht im Log.
+- Liefert die 2.0 API **keine eVar-Einstellungen** (z. B. weil Adobe einen
+  `expansion`-Wert nicht kennt), läuft das Skript trotzdem weiter und schreibt eine
+  Warnung ins Log. Die Übersicht zeigt in „eVars mit Einstellungen", wie viele eVars
+  Allokation/Expiration enthalten.
+- Einstellungen für Props, Events und List-Variablen sind über keine aktuelle Adobe-API
+  mehr abrufbar, nur noch in der Oberfläche unter *Admin > Report Suites*.
 - **Segmente mit `--rsids`** liefert nur Segmente, die auf diesen Report Suites *angelegt*
   wurden. Segmente sind aber RS-übergreifend nutzbar. Für eine vollständige Liste
   `--all-segments` verwenden.

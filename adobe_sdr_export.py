@@ -4,9 +4,11 @@ Adobe Analytics SDR-Export
 ==========================
 
 Exportiert für eine oder mehrere Report Suites:
-  * eVars, Props, List-Variablen, Success Events inkl. Admin-Einstellungen
-    (Allokation, Expiration, Merchandising, Serialisierung, Participation …)
-    -> Adobe Analytics 1.4 Admin API (ReportSuite.Get*)
+  * eVars inkl. Einstellungen (Allokation, Expiration, Typ, Merchandising,
+    Binding Events), Props, List-Variablen, Success Events
+    -> Adobe Analytics 2.0 API (/dimensions, /metrics)
+    Hinweis: Die 1.4 API wurde von Adobe im August 2026 abgeschaltet. Die 2.0 API
+    liefert Konfigurationsdetails nur für eVars, nicht für Props, Events und Listvars.
   * alle Dimensionen und Metriken inkl. Beschreibung, Kategorie, Tags
     -> Adobe Analytics 2.0 API (/dimensions, /metrics)
   * Segmente inkl. Scope (Hit/Visit/Visitor), Definition als lesbarer Text,
@@ -42,7 +44,6 @@ import requests
 
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 API_BASE = "https://analytics.adobe.io"
-API14_URL = "https://api.omniture.com/admin/1.4/rest/"
 DEFAULT_SCOPES = (
     "openid,AdobeID,read_organizations,"
     "additional_info.projectedProductContext,additional_info.job_function"
@@ -59,6 +60,14 @@ CALCMETRIC_EXPANSION = (
     "reportSuiteName,ownerFullName,modified,tags,definition,categories,sharesFullName"
 )
 DIM_METRIC_EXPANSION = "tags,allowedForReporting,categories"
+# eVar-Einstellungen (nur für eVars befüllt), siehe
+# https://developer.adobe.com/analytics-apis/docs/2.0/guides/endpoints/dimensions/
+EVAR_EXPANSION = (
+    "allocationType,expirationType,expirationCustomDays,dataType,"
+    "bindingEvents,merchandisingSyntax,attributionModel"
+)
+EVAR_FIELDS = ["allocationType", "expirationType", "expirationCustomDays", "dataType",
+               "merchandisingSyntax", "bindingEvents", "ecomAllocationType", "attributionModel"]
 
 
 def log(msg: str) -> None:
@@ -151,10 +160,14 @@ class AdobeClient:
         return self.company_id
 
     # --- 2.0 API ----------------------------------------------------------- #
-    def get20(self, path: str, params: dict | None = None) -> Any:
+    def get20(self, path: str, params: dict | None = None, fallback_expansion: str | None = None) -> Any:
         url = f"{API_BASE}/api/{self.company_id}{path}"
         params = dict(params or {})
         r = self._request("GET", url, params=params)
+        if r.status_code == 400 and fallback_expansion and params.get("expansion") != fallback_expansion:
+            log(f"  400 bei {path} mit erweiterter expansion – versuche Basis-Expansion: {r.text[:200]}")
+            params["expansion"] = fallback_expansion
+            r = self._request("GET", url, params=params)
         if r.status_code == 400 and "expansion" in params:
             # Falls Adobe einen Expansion-Wert nicht (mehr) kennt: ohne Expansion erneut
             log(f"  400 bei {path} mit expansion – versuche ohne: {r.text[:200]}")
@@ -172,13 +185,6 @@ class AdobeClient:
             if data.get("lastPage", True) or page + 1 >= data.get("totalPages", 1):
                 return out
             page += 1
-
-    # --- 1.4 Admin API ----------------------------------------------------- #
-    def call14(self, method: str, body: dict) -> Any:
-        r = self._request("POST", API14_URL, params={"method": method}, json=body)
-        if r.status_code != 200:
-            raise RuntimeError(f"1.4 {method} -> {r.status_code}: {r.text[:500]}")
-        return r.json()
 
 
 # --------------------------------------------------------------------------- #
@@ -388,21 +394,7 @@ def write_excel(sheets: dict[str, pd.DataFrame], path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Export-Logik
 # --------------------------------------------------------------------------- #
-def fetch_14(client: AdobeClient, method: str, rsids: list[str], list_key: str) -> list[dict]:
-    """Ruft eine ReportSuite.Get*-Methode auf und flacht das Ergebnis ab."""
-    try:
-        data = client.call14(method, {"rsid_list": rsids})
-    except Exception as e:  # noqa: BLE001
-        log(f"  WARNUNG: {method} fehlgeschlagen – {e}")
-        return []
-    rows = []
-    for suite in data or []:
-        for item in suite.get(list_key, []) or []:
-            rows.append({"rsid": suite.get("rsid"), "report_suite": suite.get("site_title"), **item})
-    return rows
-
-
-def export(client: AdobeClient, rsids: list[str], out: Path, use_14: bool,
+def export(client: AdobeClient, rsids: list[str], out: Path,
            all_segments: bool, locale: str) -> None:
     client.discover_company()
 
@@ -418,7 +410,8 @@ def export(client: AdobeClient, rsids: list[str], out: Path, use_14: bool,
     for rsid in rsids:
         log(f"2.0 Dimensionen/Metriken für {rsid}")
         common = {"rsid": rsid, "locale": locale, "expansion": DIM_METRIC_EXPANSION}
-        for d in client.get20("/dimensions", common):
+        dim_params = {**common, "expansion": f"{DIM_METRIC_EXPANSION},{EVAR_EXPANSION}"}
+        for d in client.get20("/dimensions", dim_params, fallback_expansion=DIM_METRIC_EXPANSION):
             dims.append({"rsid": rsid, **d})
         for m in client.get20("/metrics", common):
             mets.append({"rsid": rsid, **m})
@@ -426,7 +419,6 @@ def export(client: AdobeClient, rsids: list[str], out: Path, use_14: bool,
     names = {}
     for x in dims + mets:
         names.setdefault(x["id"], x.get("name", ""))
-    desc20 = {(x["rsid"], x["id"]): x.get("description", "") for x in dims + mets}
 
     # ---- 2.0: Segmente ----------------------------------------------------
     log("2.0 Segmente")
@@ -512,27 +504,24 @@ def export(client: AdobeClient, rsids: list[str], out: Path, use_14: bool,
             "definition_json": definition,
         })
 
-    # ---- 1.4: Admin-Einstellungen -----------------------------------------
-    evars = props = listvars = events = []
-    if use_14:
-        log("1.4 Admin-Einstellungen (eVars, Props, Listvars, Events)")
-        evars = fetch_14(client, "ReportSuite.GetEVars", rsids, "evars")
-        props = fetch_14(client, "ReportSuite.GetProps", rsids, "props")
-        listvars = fetch_14(client, "ReportSuite.GetListVariables", rsids, "list_variables")
-        events = fetch_14(client, "ReportSuite.GetSuccessEvents", rsids, "events")
-
-    def add_20_desc(rows: list[dict], prefix: str) -> list[dict]:
-        for r in rows:
-            r["description_2_0"] = desc20.get((r["rsid"], f"{prefix}{r.get('id')}"), "")
-        return rows
-
-    # Fallback auf 2.0-Daten, falls 1.4 nicht verfügbar ist
+    # ---- eVars, Props, Listvars, Events aus der 2.0 API --------------------
     def from_20(rows: list[dict], pattern: str) -> list[dict]:
-        return [r for r in rows if re.fullmatch(pattern, r["id"])]
+        return [{"report_suite": rs_names.get(r["rsid"], ""), **r}
+                for r in rows if re.fullmatch(pattern, r["id"])]
 
-    evars = add_20_desc(evars, "variables/") if evars else from_20(dims, r"variables/evar\d+")
-    props = add_20_desc(props, "variables/") if props else from_20(dims, r"variables/prop\d+")
-    events = add_20_desc(events, "metrics/") if events else from_20(mets, r"metrics/event\d+")
+    evars = from_20(dims, r"variables/evar\d+")
+    props = from_20(dims, r"variables/prop\d+")
+    listvars = from_20(dims, r"variables/listvariable\d+")
+    events = from_20(mets, r"metrics/event\d+")
+
+    for e in evars:  # Binding Events lesbar machen (Metrik-IDs -> Namen)
+        if isinstance(e.get("bindingEvents"), list):
+            e["bindingEvents"] = ", ".join(comp_label(names, b) for b in e["bindingEvents"])
+    evar_settings = sum(1 for e in evars if e.get("allocationType") or e.get("expirationType"))
+    if evars and not evar_settings:
+        log("  WARNUNG: Die 2.0 API hat keine eVar-Einstellungen (Allokation/Expiration) geliefert.")
+    else:
+        log(f"  eVar-Einstellungen für {evar_settings} von {len(evars)} eVars erhalten")
 
     def sort_key(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty or "id" not in df.columns:
@@ -543,19 +532,22 @@ def export(client: AdobeClient, rsids: list[str], out: Path, use_14: bool,
     overview = pd.DataFrame([{
         "rsid": r,
         "report_suite": rs_names.get(r, "(nicht gefunden)"),
-        "eVars (enabled)": sum(1 for e in evars if e.get("rsid") == r and e.get("enabled", True)),
-        "Props (enabled)": sum(1 for p in props if p.get("rsid") == r and p.get("enabled", True)),
-        "Events": sum(1 for e in events if e.get("rsid") == r),
+        "eVars": sum(1 for e in evars if e["rsid"] == r),
+        "eVars mit Einstellungen": sum(1 for e in evars if e["rsid"] == r
+                                       and (e.get("allocationType") or e.get("expirationType"))),
+        "Props": sum(1 for p in props if p["rsid"] == r),
+        "Listvars": sum(1 for x in listvars if x["rsid"] == r),
+        "Events": sum(1 for e in events if e["rsid"] == r),
         "Dimensionen gesamt": sum(1 for d in dims if d["rsid"] == r),
         "Metriken gesamt": sum(1 for m in mets if m["rsid"] == r),
         "Exportiert am": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "Quelle Admin-Settings": "1.4 Admin API" if use_14 else "nur 2.0 API",
+        "Quelle": "Adobe Analytics 2.0 API",
     } for r in rsids])
 
-    head = ["rsid", "report_suite", "id", "name", "description", "description_2_0"]
+    head = ["rsid", "report_suite", "id", "name", "description"]
     sheets = {
         "Übersicht": overview,
-        "eVars": sort_key(to_df(evars, head)),
+        "eVars": sort_key(to_df(evars, head + EVAR_FIELDS)),
         "Props": sort_key(to_df(props, head)),
         "Listvars": sort_key(to_df(listvars, head)),
         "Events": sort_key(to_df(events, head)),
@@ -579,7 +571,8 @@ def main() -> None:
     ap.add_argument("--rsids", nargs="*", help="Report Suite IDs (überschreibt config.json)")
     ap.add_argument("--out", help="Ausgabedatei (.xlsx)")
     ap.add_argument("--list-rsids", action="store_true", help="Nur verfügbare Report Suites auflisten")
-    ap.add_argument("--skip-14", action="store_true", help="1.4 Admin API nicht nutzen (nur 2.0)")
+    # Ohne Funktion: die 1.4 API ist abgeschaltet. Bleibt erhalten, damit alte Aufrufe weiter laufen.
+    ap.add_argument("--skip-14", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--all-segments", action="store_true",
                     help="Alle Segmente/Calc Metrics der Company, nicht nur die der gewählten RS")
     ap.add_argument("--locale", default=None, help="z.B. de_DE oder en_US (Standard: config bzw. en_US)")
@@ -608,7 +601,7 @@ def main() -> None:
     if not rsids:
         raise SystemExit("Keine Report Suites angegeben (--rsids oder 'rsids' in config.json).")
     out = Path(args.out or f"adobe_sdr_{datetime.now():%Y%m%d_%H%M}.xlsx")
-    export(client, rsids, out, use_14=not args.skip_14, all_segments=args.all_segments,
+    export(client, rsids, out, all_segments=args.all_segments,
            locale=args.locale or cfg.get("locale", "en_US"))
 
 
